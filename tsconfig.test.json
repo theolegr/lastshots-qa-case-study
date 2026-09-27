@@ -1,0 +1,49 @@
+{
+  // The test suite is the deliverable of this repo, so it gets type-checked
+  // like the app does. Neither Playwright nor Vitest type-checks what it runs —
+  // both transpile and execute — so without this project a type error in a spec
+  // or a helper would only ever surface as a runtime failure, if at all.
+  //
+  // Checked with `npm run typecheck` and in the unit job of CI.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    // vite/client supplies `import.meta.env`, which the unit tests reach
+    // transitively: they import `@/lib/*`, which imports the Supabase client.
+    "types": ["node", "vite/client"],
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    // Every compiler flag tsconfig.app.json sets, set identically here — which
+    // is what the note above always claimed and what this file did not do.
+    // `strict`, `noImplicitAny` and `strictNullChecks` were all `false`, and
+    // the three below were simply absent, so "type-checked like the app does"
+    // was false for every file this project sees: the specs, the helpers, and
+    // — through them — the `src/` modules they import. Turning all six on cost
+    // one unused binding in `podium-correctness.spec.ts`.
+    //
+    // It was not harmless while it lasted. `strictNullChecks: false` makes zod
+    // infer every object property as optional, which silently voids any
+    // type-level assertion written through `z.infer` or `satisfies
+    // z.ZodType<T>` — including the drift guards in `src/lib/dbContracts.ts`,
+    // whose whole job is to fail the build when the schema moves. A guard that
+    // stops meaning anything in one of two projects is the failure mode this
+    // repo has now hit three times: fixtures that checked `error` on an UPDATE
+    // matching zero rows, and a hand-written `Situation.emoji: string` over a
+    // nullable column, were the first two.
+    "strict": true,
+    "noImplicitAny": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["tests", "scripts", "playwright.config.ts"]
+}

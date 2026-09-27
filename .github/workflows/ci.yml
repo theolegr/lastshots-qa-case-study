@@ -1,0 +1,426 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  # No `branches` filter, deliberately. It used to read `branches: [main]`, which
+  # meant a stacked PR — one targeting another branch rather than `main` — fired
+  # no workflow at all: not the smoke tier, not lint, not the doc guard. `gh pr
+  # checks` reported "no checks reported" and the contents reached `main` later
+  # inside someone else's merge. It went unnoticed because until PR #3 every PR
+  # here targeted `main`, so the gap had never had a PR to show itself on.
+  #
+  # Widening this costs nothing for the `unit` job and is quota-free. The `e2e`
+  # job stays scoped to PRs that target `main` — see its own `if:`.
+  pull_request:
+  workflow_dispatch:
+
+# `pages`/`id-token` are needed by the publish job below; everything else keeps
+# the default read-only token. The one job that writes — `metrics`, to its own
+# branch — raises `contents` to `write` on itself rather than here, so no other
+# job in this file can write to the repository by accident.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# The E2E tiers spend a finite resource (anonymous sign-ins, see the e2e job).
+# Superseded runs on the same ref are cancelled so a branch pushed five times in
+# a row costs one run's worth of quota, not five. `main` is exempt: every commit
+# there is the full-suite gate and must produce its own verdict.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  unit:
+    name: Static checks + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm install -g npm@11
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+      # Covers the app *and* the test suite (tsconfig.test.json). Playwright and
+      # Vitest only transpile what they run, so without this step a type error
+      # in a spec or helper would never fail the build.
+      - name: Typecheck (src + tests)
+        run: npm run typecheck
+      - name: Doc-count guard (advertised test counts match disk)
+        run: npm run check:docs
+      # Runs the unit suite *and* enforces the coverage thresholds in
+      # vite.config.ts. Scoped to src/lib (the pure-logic modules) — see the
+      # comment there for why a repo-wide figure would be misleading rather
+      # than stricter.
+      - name: Unit tests + coverage thresholds
+        run: npm run test:coverage
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30
+
+  e2e:
+    name: E2E tests (playwright)
+    runs-on: ubuntu-latest
+    needs: unit
+    # Every PR runs `unit` (quota-free); only PRs that actually target `main`
+    # spend anon sign-ins on the browser tiers. A stacked PR is gated by lint,
+    # typecheck, the doc guard and 174 unit tests, and its E2E verdict comes
+    # when it is retargeted at `main` or when its base merges there.
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
+    # E2E hits real Supabase (anonymous sign-ins, RLS-scoped writes), so it
+    # spends a quota rather than just time: 104 sign-ins for the full suite
+    # (measured 2026-09-10) against a 200/hour cap per IP. Exhausting it
+    # surfaces as sign-in failures indistinguishable from real test failures.
+    #
+    # Two tiers (see TEST_STRATEGY.md, "CI tiers"):
+    #   PR → main         → @smoke
+    #   PR → other branch → skipped (see the `if:` above); `unit` still runs
+    #   push to main      → full suite, then k6 — the complete verdict
+    #   workflow_dispatch → the same, on demand
+    timeout-minutes: 20
+    env:
+      VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+      CI: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm install -g npm@11
+      - run: npm ci
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/package-lock.json') }}
+      - run: npx playwright install --with-deps chromium
+      # Kept as two explicitly-guarded steps rather than one interpolated
+      # command: the tier a given run used is then readable from the job log
+      # without reconstructing shell conditionals.
+      - name: E2E — smoke tier (pull request)
+        if: github.event_name == 'pull_request'
+        run: npx playwright test --grep @smoke
+      - name: E2E — full suite (push to main, or on demand)
+        if: github.event_name != 'pull_request'
+        run: npx playwright test
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30
+      # The Web Vitals numbers `web-vitals.spec.ts` wrote. Uploaded separately
+      # from the HTML report because the metrics job wants the JSON and nothing
+      # else, and `if-no-files-found: ignore` because the smoke tier does not run
+      # that spec — a PR run legitimately produces none.
+      - name: Upload Web Vitals measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitals-report
+          path: reports/vitals/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # One JSON line per commit, recording what each tier measured, on the
+  # `metrics` branch.
+  #
+  # This exists because the repo argues that the mutation score and the load
+  # figures are measurements to compare rather than thresholds to gate on — and
+  # that only holds if the runs survive a CI artefact's 30-day retention.
+  #
+  # The history lives on its own branch, not on `main`. It used to be committed
+  # to `main` twice per push (once here, once by `load`), so the tip of `main`
+  # was never the commit that was tested and the history people read was half
+  # bot commits. On `metrics` it is still versioned and diffable, and `main`
+  # holds only what was written by hand. One job, one commit per run: it waits
+  # for `load` so the k6 figures land in the same row.
+  metrics:
+    name: Record metrics history
+    runs-on: ubuntu-latest
+    # `e2e` and `load` are in `needs` for their *artefacts*, not their verdicts
+    # — hence `always()`. Recording only after a green run would lose the
+    # coverage and mutation figures of exactly the runs worth comparing later.
+    needs: [unit, mutation, e2e, load]
+    if: >-
+      always()
+      && github.ref == 'refs/heads/main'
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # No `npm ci`: the recorder imports node builtins only.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: coverage-report
+          path: coverage
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: mutation-report
+          path: reports/mutation
+      # Tolerated missing: each reader returns null when its input is absent and
+      # the row records "not measured" rather than blocking the whole history.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: vitals-report
+          path: reports/vitals
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: load-report
+          path: reports/load
+      # Record and commit in one retry loop, re-deriving rather than merging.
+      # Two runs can race for the branch; `record-metrics.mjs` is keyed by commit
+      # SHA and merges into an existing row, so resetting onto the latest
+      # `metrics` and recording again produces exactly the right file with no
+      # conflict to resolve. The first run ever creates the branch, orphaned —
+      # it shares no history with `main`.
+      - name: Record this run on the metrics branch
+        run: |
+          set -euo pipefail
+          git config --global user.name  "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          for attempt in 1 2 3; do
+            rm -rf .metrics
+            if git ls-remote --exit-code --heads origin metrics > /dev/null; then
+              git fetch origin metrics
+              git worktree add --force .metrics FETCH_HEAD
+              (cd .metrics && git checkout -q -B metrics)
+            else
+              git worktree add --force --detach .metrics
+              (cd .metrics && git checkout -q --orphan metrics && git rm -rfq . && git clean -fdq)
+            fi
+
+            node scripts/record-metrics.mjs --history .metrics/metrics.jsonl
+
+            cd .metrics
+            git add metrics.jsonl
+            if git diff --cached --quiet; then
+              echo "No change to record."
+              exit 0
+            fi
+            git commit -q -m "record ${GITHUB_SHA:0:7}"
+            if git push origin metrics; then
+              echo "Recorded on attempt ${attempt}."
+              exit 0
+            fi
+            cd ..
+            git worktree remove --force .metrics
+
+            echo "metrics moved under attempt ${attempt}; re-deriving."
+            sleep $((attempt * 5))
+          done
+
+          echo "Could not record after 3 attempts — the metrics branch is moving faster than this job."
+          exit 1
+
+  # Publish the reports the README links to. Until this existed, the central
+  # claims of the case study — 100% coverage on src/lib, 38 E2E tests under real
+  # RLS, a 99.54% mutation score — were prose, and their proof was an artifact in
+  # the Actions tab that expired after 30 days and needed repo access to reach. A
+  # reviewer had to take the repository's word for it or clone it and stand up
+  # their own Supabase project. Neither is a reasonable ask of a reviewer.
+  #
+  # `main` only: a PR's smoke tier is a subset, and publishing it would put a
+  # partial run behind a link the README presents as the full suite.
+  #
+  # Also gated on the repository being public, and that is not a placeholder.
+  # GitHub refuses Pages on a private repository under this account's plan
+  # (`422: Your current plan does not support GitHub Pages for this repository`),
+  # so while the repo is private this job would fail on `configure-pages` every
+  # time. A permanently red job that everyone learns to ignore is worse than no
+  # job — it teaches people that a failing check is normal. The condition means
+  # this starts publishing by itself the first time `main` is pushed after the
+  # repository goes public, with no edit here.
+  publish-reports:
+    name: Publish reports to Pages
+    runs-on: ubuntu-latest
+    # `metrics` too, so the history on the index includes the run being
+    # published; `load`, so the load page is this run's. `always()` plus explicit
+    # results, because a load run that breaches a threshold must not stop the
+    # other three reports publishing — the load page shows its own verdict.
+    needs: [unit, e2e, mutation, metrics, load]
+    if: >-
+      always()
+      && needs.unit.result == 'success'
+      && needs.e2e.result == 'success'
+      && needs.mutation.result == 'success'
+      && needs.metrics.result == 'success'
+      && github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && github.event.repository.private == false
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      # The history the index renders, from the branch `metrics` just wrote to.
+      # Absent on a repository that has never recorded a run; the site says so.
+      - name: Fetch the metrics history
+        run: |
+          if git fetch --depth 1 origin metrics; then
+            git show FETCH_HEAD:metrics.jsonl > "$RUNNER_TEMP/metrics.jsonl"
+          else
+            : > "$RUNNER_TEMP/metrics.jsonl"
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: playwright-report
+          path: site/playwright
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+          path: site/coverage
+      - uses: actions/download-artifact@v4
+        with:
+          name: mutation-report
+          path: site/mutation
+      # Normally this run's report, since `load` is in `needs`. If that job did
+      # not upload one, the most recent report still within retention is used and
+      # the page dates it; if there is none, the site says so in place of the
+      # link. Failure here must not fail the publish.
+      - name: Fetch the last load run still in retention
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          id=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=load-report&per_page=5" \
+                 --jq '[.artifacts[] | select(.expired == false)] | first | .id // empty')
+          if [ -z "$id" ]; then
+            echo "No load-report artifact within retention."
+            exit 0
+          fi
+          mkdir -p reports/load
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > load.zip
+          unzip -o -q load.zip -d reports/load
+          echo "Recovered load report from artifact $id."
+      # Renders the k6 page, then the index — which links only the reports that
+      # are actually present and explains the absence of the ones that are not.
+      - name: Build the site
+        env:
+          METRICS_HISTORY: ${{ runner.temp }}/metrics.jsonl
+        run: node scripts/build-report-site.mjs site reports/load
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+  # Runs with no threshold — deliberately. A mutation score is a measurement, and
+  # gating on it turns every legitimate refactor that shifts the mutant
+  # population into a build failure someone has to argue with. The usual answer
+  # to that is to lower the threshold until it stops complaining, at which point
+  # it guarantees nothing. `break: null` in stryker.config.json keeps it a
+  # report; regressions are found by comparing runs, which is what the `metrics`
+  # job below makes possible.
+  #
+  # It runs on every push to `main` as well as on demand. It used to be dispatch
+  # only, which was defensible while the report went nowhere — but the published
+  # site links it, and a report produced at a different commit from the one the
+  # site claims to describe is worse than none. The run is ~11s and spends no
+  # anonymous sign-ins, so matching it to the commit costs nothing worth naming.
+  mutation:
+    name: Mutation testing (Stryker)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm install -g npm@11
+      - run: npm ci
+      - name: Stryker over src/lib
+        run: npm run test:mutation
+      - name: Upload the mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: reports/mutation/
+          retention-days: 30
+
+  load:
+    name: Load tests (k6)
+    runs-on: ubuntu-latest
+    # Runs after E2E, never beside it. k6 and Playwright hit the same Supabase
+    # project, and the first run that let them overlap failed E2E: `load`
+    # finished in 1m02 while `e2e` was still running. `needs: e2e` serialises
+    # them, and a failed E2E run does not go on to spend more quota.
+    needs: e2e
+    # Every push to `main`, and on demand. The two scenarios cost 3 anonymous
+    # sign-ins (1 for the join burst, 2 for the vote storm) on top of the full
+    # E2E suite's 104 — still inside one hour's 200.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    env:
+      VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+      VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: grafana/setup-k6-action@v1
+      # k6 writes the summary files but not their directory, and a run that
+      # completed only to fail on `open reports/load/...: no such file` would
+      # have spent its anon sign-ins for nothing.
+      - name: Create the report directory
+        run: mkdir -p reports/load
+      - name: Join burst (p95 latency + error rate)
+        run: |
+          k6 run \
+            --env SUPABASE_URL=$VITE_SUPABASE_URL \
+            --env SUPABASE_ANON_KEY=$VITE_SUPABASE_PUBLISHABLE_KEY \
+            tests/load/join-flow.js
+      - name: Vote retry storm (UNIQUE constraint under contention)
+        run: |
+          k6 run \
+            --env SUPABASE_URL=$VITE_SUPABASE_URL \
+            --env SUPABASE_ANON_KEY=$VITE_SUPABASE_PUBLISHABLE_KEY \
+            tests/load/concurrent-voting.js
+      # The JSON `handleSummary` wrote, not a screenshot of a log. `publish-reports`
+      # waits for this job and renders the report into the site.
+      - name: Upload the load report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-report
+          path: reports/load/
+          retention-days: 30

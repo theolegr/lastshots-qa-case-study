@@ -1,0 +1,4 @@
+project_id = "amcmuoqsfpmuotnmhjvu"
+
+[functions.cleanup-old-parties]
+verify_jwt = false

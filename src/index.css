@@ -1,0 +1,161 @@
+/* @import must precede every other statement, @tailwind included — Vite warns
+   on each start otherwise. One import covers the weights actually used. */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Pure Black Background */
+    --background: 20 14.2857% 4.1176%;
+    --foreground: 0 0% 95%;
+
+    --card: 0 0% 5%;
+    --card-foreground: 0 0% 95%;
+
+    --popover: 0 0% 5%;
+    --popover-foreground: 0 0% 95%;
+
+    /* Primary: Vibrant Orange */
+    --primary: 33 78% 48%;
+    --primary-foreground: 0 0% 100%;
+
+    /* Secondary: Neutral gray */
+    --secondary: 0 0% 12%;
+    --secondary-foreground: 0 0% 95%;
+
+    --muted: 0 0% 8%;
+    --muted-foreground: 0 0% 50%;
+
+    /* Accent: Bright orange */
+    --accent: 32 94.6188% 43.7255%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 0 0% 12%;
+    --input: 0 0% 8%;
+    --ring: 262 83% 58%;
+
+    --radius: 0.5rem;
+
+    /* Status colors */
+    --status-waiting: 0 0% 50%;
+    --status-active: 262 83% 58%;
+    --status-voting: 199 89% 48%;
+    --status-results: 45 93% 47%;
+  }
+  .dark {
+    --background: 0 0% 0%;
+    --foreground: 0 0% 95%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'Inter', system-ui, sans-serif;
+    min-height: 100vh;
+  }
+}
+
+@layer components {
+  /* Glass surface */
+  .glass {
+    background: rgba(255, 255, 255, 0.03);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  /* Primary glow */
+  .glow-primary {
+    box-shadow: 0 0 24px hsl(var(--primary) / 0.15);
+  }
+
+  /* Minimal card style */
+  .card-minimal {
+    background: hsl(var(--card));
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+  }
+
+  .card-minimal:hover {
+    border-color: hsl(var(--border) / 0.8);
+    background: hsl(0 0% 6%);
+  }
+
+  /* Glass card (updated) */
+  .glass-card {
+    background: rgba(255, 255, 255, 0.03);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: var(--radius);
+  }
+
+  .shot-indicator {
+    transition: all 0.3s ease;
+  }
+
+  .shot-indicator.used {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+
+  .countdown-ring {
+    stroke-dasharray: 283;
+    stroke-dashoffset: 0;
+    transform: rotate(-90deg);
+    transform-origin: center;
+  }
+}
+
+@layer utilities {
+  .touch-target {
+    min-height: 48px;
+    min-width: 48px;
+  }
+}
+
+/* Animations */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slide-up-fade {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-5px); }
+  75% { transform: translateX(5px); }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+.animate-slide-up-fade {
+  animation: slide-up-fade 0.4s ease-out;
+}
+
+.animate-shake {
+  animation: shake 0.3s ease-in-out;
+}

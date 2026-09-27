@@ -1,0 +1,51 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Environment variables
+.env
+.env.*
+.env.local
+.env.production
+!.env.example
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Test artifacts
+playwright-report/
+test-results/
+coverage/
+
+# Supabase CLI local state
+supabase/.temp/
+supabase/.branches/
+
+# Generated report output, all of it reproducible by the command that writes it:
+# `reports/mutation/` (npm run test:mutation), `reports/load/` (k6 handleSummary),
+# `site/` (node scripts/build-report-site.mjs).
+reports/*
+.stryker-tmp/
+site/
+
+# That includes reports/history/, where `npm run report:metrics` writes by
+# default. The real history is `metrics.jsonl` on the `metrics` branch, written
+# by CI — see scripts/record-metrics.mjs.

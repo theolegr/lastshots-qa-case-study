@@ -1,0 +1,37 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "Mutation testing over the pure-logic modules. The unit tier reports 100% line, branch, function and statement coverage on src/lib — a statement that every branch was *executed*, not that a test would fail if one were wrong. This measures the second thing. See Guiding Rule 4 in TEST_STRATEGY.md.",
+
+  "packageManager": "npm",
+  "testRunner": "vitest",
+  "reporters": ["html", "json", "progress", "clear-text"],
+
+  "_comment_mutate": "Deliberately the same surface as the coverage config in vite.config.ts, minus its two exclusions: api.ts is the I/O boundary that a unit test cannot even import, and devTools.ts is a single import.meta.env constant. Mutating either would manufacture survivors that say nothing about the unit tier, and the two numbers would stop describing the same code.",
+  "mutate": [
+    "src/lib/**/*.ts",
+    "!src/lib/api.ts",
+    "!src/lib/devTools.ts"
+  ],
+
+  "vitest": {
+    "configFile": "vite.config.ts",
+    "dir": "tests/unit"
+  },
+
+  "_comment_coverageAnalysis": "perTest: Stryker runs only the tests that actually cover each mutant. The unit suite is ~300ms with no I/O and no shared state, so this is safe here and cuts the run substantially.",
+  "coverageAnalysis": "perTest",
+
+  "_comment_thresholds": "No CI gate, on purpose. Do not set a threshold before there is a measured baseline to set it from — a number picked in advance is either so low it passes anything or so high it blocks the first honest run. `break` is null so the command reports and never fails the build.",
+  "thresholds": {
+    "high": 90,
+    "low": 80,
+    "break": null
+  },
+
+  "htmlReporter": {
+    "fileName": "reports/mutation/index.html"
+  },
+  "jsonReporter": {
+    "fileName": "reports/mutation/mutation.json"
+  }
+}

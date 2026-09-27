@@ -1,0 +1,1 @@
+ALTER TABLE public.situation_pool ENABLE ROW LEVEL SECURITY;;

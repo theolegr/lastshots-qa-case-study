@@ -1,0 +1,57 @@
+name: Retention
+
+# Invokes the cleanup-old-parties edge function, which deletes parties older
+# than 72h along with their participants, situations, photos, votes and storage
+# objects (MO-001).
+#
+# Why a workflow and not pg_cron: the original schedule was created by hand in
+# the old project's dashboard, so it evaporated when the project was split on
+# 2026-06-26 and retention died silently for five weeks (BUG-003). A cron job
+# living in the repo is reviewable, has a run history, and cannot be lost with a
+# project. The database migrations could not carry it at the time either — the
+# local and remote migration histories had diverged, so `db push` was not a safe
+# path. They were reconciled on 2026-08-22; the reasons above are the ones that
+# still hold.
+#
+# Daily at 03:00 UTC is well inside the 72h window. The function is idempotent:
+# with nothing to delete it returns {"deleted": 0}.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    name: Delete parties older than 72h
+    runs-on: ubuntu-latest
+    steps:
+      - name: Invoke cleanup-old-parties
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+        run: |
+          if [ -z "$VITE_SUPABASE_URL" ]; then
+            echo "::error::VITE_SUPABASE_URL secret is not set"
+            exit 1
+          fi
+
+          # POST executes the cleanup. OPTIONS would return early without
+          # deleting anything (index.ts:10-12) — do not "simplify" this.
+          response=$(curl -sS -X POST \
+            "$VITE_SUPABASE_URL/functions/v1/cleanup-old-parties" \
+            -H "Content-Type: application/json" \
+            -d '{}' \
+            -w "\n%{http_code}")
+
+          body=$(echo "$response" | sed '$d')
+          code=$(echo "$response" | tail -n1)
+
+          echo "HTTP $code"
+          echo "$body"
+
+          if [ "$code" != "200" ]; then
+            echo "::error::Cleanup failed with HTTP $code"
+            exit 1
+          fi
+
+          echo "deleted=$(echo "$body" | jq -r '.deleted // "unknown"')" >> "$GITHUB_STEP_SUMMARY"
